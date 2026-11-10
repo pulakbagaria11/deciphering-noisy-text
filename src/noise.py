@@ -228,3 +228,89 @@ def motion_blur(img, rng, length_range=(3, 11), angle_range=(-20, 20)):
     kernel /= s
 
     return cv2.filter2D(img, -1, kernel, borderType=cv2.BORDER_REPLICATE)
+
+def rand_edge_point(rng, W, H, edge):
+    """A random (x, y) point on one edge: 0 = left, 1 = right, 2 = top, 3 = bottom."""
+    if edge == 0:
+        return [0, rng.uniform(0, H)]
+    if edge == 1:
+        return [W - 1, rng.uniform(0, H)]
+    if edge == 2:
+        return [rng.uniform(0, W), 0]
+    return [rng.uniform(0, W), H - 1]
+ 
+ 
+
+def curved_lines(img, rng, count=3, thickness=2):
+    """
+    Draws "count" wavy lines across the image, each "thickness" pixels wide.
+
+    Each image start from the left end and goes to right
+
+    Returns a new array, the input img is not modified.
+    """
+    out = img.copy()
+    H, W = out.shape[:2]
+    channels = 1 if out.ndim == 2 else out.shape[2]
+    t = np.linspace(0, 1, 300)[:, None]          # 300 points along each curve
+    # 300 points are able to give the smoothness to the line
+
+    for _ in range(count):
+
+        e1, e2 = rng.choice(4, size=2, replace=False) # i randonmly select two edge so that we get start
+        # and end on different edges
+        start = rand_edge_point(rng, W, H, e1)
+        end = rand_edge_point(rng, W, H, e2)
+        
+        
+        # Two random points in the middle decide how the line bends
+        mid1 = [rng.uniform(0, W), rng.uniform(0, H)]
+        mid2 = [rng.uniform(0, W), rng.uniform(0, H)]
+        P = np.array([start, mid1, mid2, end])
+
+        # using this equation to find the 300 coordinates for the line, as t changes the the effect
+        # of each of four selected points change
+        B = ((1 - t) ** 3) * P[0] + 3 * ((1 - t) ** 2) * t * P[1] \
+            + 3 * (1 - t) * (t ** 2) * P[2] + (t ** 3) * P[3]
+        pts = np.round(B).astype(np.int32).reshape(-1, 1, 2)
+
+        color = _rand_color(img, rng)   
+        cv2.polylines(out, [pts], isClosed=False, color=color,
+                      thickness=thickness, lineType=cv2.LINE_AA)
+
+    return out
+
+
+def occlusion_blobs(img, rng, count=3, max_size=8):
+    """Covers the image with "count" irregular blobs, each at most "max_size" pixels across.
+    we use a circle to create a blob, so maximum allowed radius would max_size/2
+
+    Returns a new array; the input is not modified.
+    """
+    out = img.copy()
+    H, W = out.shape[:2]
+    channels = 1 if out.ndim == 2 else out.shape[2]
+    angles = np.linspace(0, 2 * np.pi, 60, endpoint=False)
+
+    for n in range(count):
+        cx, cy = rng.uniform(0, W), rng.uniform(0, H)       # blob centre
+        r = rng.uniform(0.2, 1.0) * max_size / 2            # base radius
+
+        # for every angle we add the values from three sin curves, each with different amounts of maxima and minima
+        # so that we get different amounts of radius, for every angle
+        wobble = sum(rng.uniform(0, 0.2) * np.sin(k * angles + rng.uniform(0, 2 * np.pi)) for k in (1, 2, 3))
+        radius = np.minimum(r * (1 + wobble), max_size / 2)  # never exceed max_size
+
+        pts = np.stack([cx + radius * np.cos(angles), cy + radius * np.sin(angles)], axis=1)
+        # converts polar form into cartesian form 
+        pts = np.round(pts).astype(np.int32).reshape(-1, 1, 2)
+
+        # We draw blob on another copy, so that we can implement the opacity thing
+        overlay = out.copy()
+        cv2.fillPoly(overlay, [pts], color=_rand_color(img, rng), lineType=cv2.LINE_AA)
+        alpha = rng.uniform(0.6, 1.0)                        # mostly opaque
+        out = cv2.addWeighted(overlay, alpha, out, 1 - alpha)
+        # basically adding two images on top of each other pixel by pixel to get
+        # the opacity effect
+
+    return out
