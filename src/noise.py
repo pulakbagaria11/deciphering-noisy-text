@@ -228,3 +228,83 @@ def motion_blur(img, rng, length_range=(3, 11), angle_range=(-20, 20)):
     kernel /= s
 
     return cv2.filter2D(img, -1, kernel, borderType=cv2.BORDER_REPLICATE)
+
+# ---------------------------------------------------------------------------
+# Helpers (used by perspective_jitter and random_lines)
+# ---------------------------------------------------------------------------
+
+def _ink_color(img, rng, gray_range=(0, 90)):
+    """Return a random dark gray, similar to the text, so drawn lines look like ink."""
+    g = int(rng.integers(gray_range[0], gray_range[1] + 1))   # random gray level between 0 (black) and 90 (dark gray)
+    return g if img.ndim == 2 else (g,) * img.shape[2]         # grayscale image -> one number; color image -> same value per channel
+
+
+def _bg_color(img):
+    """Return the background color, estimated as the median pixel value."""
+    m = int(np.median(img))                                    # most pixels are background, so the median is a background pixel
+    return m if img.ndim == 2 else (m,) * img.shape[2]         # grayscale -> one number; color -> same value per channel
+
+
+# ---------------------------------------------------------------------------
+# perspective_jitter
+# ---------------------------------------------------------------------------
+
+def perspective_jitter(img, rng, max_shift=0.15):
+    """Simulates a photo of the text taken slightly off-angle.
+
+    Each of the 4 image corners is moved randomly by up to max_shift * width
+    (horizontally) and max_shift * height (vertically). A perspective transform
+    (homography) maps the original corners onto the moved ones. The output canvas
+    is sized to fit the warped shape exactly, so no text is cut off, and is then
+    resized back to the input's shape.
+    """
+    h, w = img.shape[:2]                                       # image height and width in pixels
+
+    # the 4 corners of the input image: top-left, top-right, bottom-right, bottom-left (x, y)
+    src = np.float32([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]])
+
+    # random shift for each corner: x in [-max_shift*w, +max_shift*w], y in [-max_shift*h, +max_shift*h]
+    shift = rng.uniform(-max_shift, max_shift, size=(4, 2)) * np.array([w, h])
+    dst = src + shift                                          # where each corner ends up after the shift
+
+    # move the shifted shape so its top-left-most point is at (0, 0)
+    dst -= dst.min(axis=0)                                     # dst.min(axis=0) = smallest x and smallest y among the 4 corners
+
+    # canvas just large enough to hold the warped shape, so nothing is pushed out of frame
+    out_w = int(np.ceil(dst[:, 0].max())) + 1                  # width  = largest x after the move
+    out_h = int(np.ceil(dst[:, 1].max())) + 1                  # height = largest y after the move
+
+    # 3x3 homography matrix that sends each src corner to its dst corner
+    M = cv2.getPerspectiveTransform(src, dst.astype(np.float32))
+
+    # apply the homography to every pixel; uncovered areas are filled with the background color
+    warped = cv2.warpPerspective(img, M, (out_w, out_h),
+                                 flags=cv2.INTER_LINEAR,       # blend the 4 nearest pixels for smooth edges
+                                 borderMode=cv2.BORDER_CONSTANT,
+                                 borderValue=_bg_color(img))
+
+    # resize back to the original (h, w) so the next noise step gets the expected shape
+    return cv2.resize(warped, (w, h), interpolation=cv2.INTER_AREA)   # INTER_AREA averages pixels, best for shrinking
+
+
+# ---------------------------------------------------------------------------
+# random_lines
+# ---------------------------------------------------------------------------
+
+def random_lines(img, rng, count=2, thickness=1):
+    """Draws straight dark lines across the text, like strike-throughs or ruled lines.
+
+    count     = number of lines to draw
+    thickness = maximum line thickness in pixels (each line gets a random thickness from 1 to this)
+    """
+    out = img.copy()                                           # copy so the input image is not modified (cv2 draws in place)
+    h, w = out.shape[:2]                                       # image height and width in pixels
+
+    for _ in range(int(count)):                                # draw `count` lines
+        p0 = (0, int(rng.integers(0, h)))                      # start point: left edge, random height
+        p1 = (w - 1, int(rng.integers(0, h)))                  # end point: right edge, random height
+        t = int(rng.integers(1, int(thickness) + 1))           # random thickness between 1 and `thickness`
+        cv2.line(out, p0, p1, _ink_color(out, rng), t,         # draw the line in a random dark gray
+                 lineType=cv2.LINE_AA)                         # anti-aliased: smooth edges like real ink
+
+    return out                                                 # same shape and dtype as the input
