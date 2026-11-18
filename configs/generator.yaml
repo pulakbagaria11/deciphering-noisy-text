@@ -34,33 +34,33 @@ char_jitter:              # per-character offsets before noise
 # Each level is an ordered list of steps; "fn" matches a function in noise.py.
 # Order matters: geometric distortion first, pixel noise and blur last.
 levels:
-  0: []                                      # clean, for debugging / upper bound
+  0: []
   1:
-    - {fn: rotate_skew, theta_range: [-1, 1], scale_range: [0.98, 1.02], shear_x_range: [-0.1, 0.1], shear_y_range: [-0.01, 0.01]}
     - {fn: gaussian_noise, sigma: 8}
   2:
-    - {fn: sine_warp, strength: 2}
-    - {fn: gaussian_noise, sigma: 15}
+    - {fn: rotate_skew, theta_range: [-1, 1], shear_x_range: [-0.1, 0.1]}
+    - {fn: gaussian_noise, sigma: 14}
     - {fn: salt_and_pepper, amount: 0.01}
   3:
-    - {fn: rotate_skew, theta_range: [-2, 2], scale_range: [0.95, 1.05], shear_x_range: [-0.2, 0.2], shear_y_range: [-0.02, 0.02]}
-    - {fn: elastic_warp, sigma_range: [4, 6], alpha_range: [1.0, 2.0]}
-    - {fn: gaussian_noise, sigma: 22}
-    - {fn: salt_and_pepper, amount: 0.03}
-    - {fn: jpeg_compression, quality_range: [50, 80]}
+    - {fn: rotate_skew, theta_range: [-2, 2], shear_x_range: [-0.2, 0.2]}
+    - {fn: elastic_warp, alpha_range: [0.5, 1.0]}
+    - {fn: random_lines, count: 1, thickness: 1}
+    - {fn: gaussian_noise, sigma: 20}
+    - {fn: salt_and_pepper, amount: 0.02}
   4:
-    - {fn: sine_warp, strength: 4}
+    - {fn: rotate_skew, theta_range: [-3, 3], shear_x_range: [-0.25, 0.25]}
+    - {fn: elastic_warp, alpha_range: [0.8, 1.5]}
+    - {fn: curved_lines, count: 2, thickness: 1}
+    - {fn: occlusion_blobs, count: 2, max_size: 6}
+    - {fn: gaussian_noise, sigma: 26}
+    - {fn: salt_and_pepper, amount: 0.03}
+  5:
+    - {fn: rotate_skew, theta_range: [-3, 3], shear_x_range: [-0.3, 0.3]}
+    - {fn: elastic_warp, alpha_range: [1.0, 2.0]}
     - {fn: curved_lines, count: 3, thickness: 2}
     - {fn: occlusion_blobs, count: 3, max_size: 8}
     - {fn: gaussian_noise, sigma: 30}
     - {fn: salt_and_pepper, amount: 0.05}
-  5:
-    - {fn: rotate_skew, theta_range: [-3, 3], scale_range: [0.92, 1.08], shear_x_range: [-0.3, 0.3], shear_y_range: [-0.03, 0.03]}
-    - {fn: elastic_warp, sigma_range: [3, 5], alpha_range: [2.0, 3.5]}
-    - {fn: gaussian_noise, sigma: 40}
-    - {fn: salt_and_pepper, amount: 0.08}
-    - {fn: jpeg_compression, quality_range: [20, 45]}
-
 # ---------- reproducibility ----------
 seeds:
   train: 1
