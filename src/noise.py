@@ -41,11 +41,11 @@ def rotate_skew(img, rng,
     M = rotation @ (back @ shear @ to_origin)
     return cv2.warpAffine(img, M[:2, :], (w, h), flags=cv2.INTER_LINEAR,
                           borderMode=cv2.BORDER_CONSTANT,
-                          borderValue=int(np.median(img)))   # grayscale images
+                          borderValue=int(np.median(img)))
 
 
 def elastic_warp(img, rng, sigma_range=(3, 6), alpha_range=(1.0, 3.0), dy_scale=0.5):
-    """alpha = typical displacement in pixels; sigma = smoothness of the distortion."""
+    """alpha is the typical displacement in pixels, sigma the smoothness of the warp."""
     h, w = img.shape[:2]
     sigma = rng.uniform(*sigma_range)
     alpha = rng.uniform(*alpha_range)
@@ -59,6 +59,23 @@ def elastic_warp(img, rng, sigma_range=(3, 6), alpha_range=(1.0, 3.0), dy_scale=
     return cv2.remap(img, x + dx, y + dy, interpolation=cv2.INTER_LINEAR,
                      borderMode=cv2.BORDER_REPLICATE)
 
+
+def perspective_jitter(img, rng, max_shift=0.08):
+    h, w = img.shape[:2]
+    src = np.float32([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]])
+
+    shift = rng.uniform(-max_shift, max_shift, size=(4, 2)) * np.array([w, h])
+    dst = src + shift
+    dst -= dst.min(axis=0)
+
+    out_w = int(np.ceil(dst[:, 0].max())) + 1
+    out_h = int(np.ceil(dst[:, 1].max())) + 1
+
+    M = cv2.getPerspectiveTransform(src, dst.astype(np.float32))
+    warped = cv2.warpPerspective(img, M, (out_w, out_h), flags=cv2.INTER_LINEAR,
+                                 borderMode=cv2.BORDER_CONSTANT,
+                                 borderValue=_bg_color(img))
+    return cv2.resize(warped, (w, h), interpolation=cv2.INTER_AREA)
 
 
 def jpeg_compression(img, rng, quality_range=(30, 95)):
@@ -77,7 +94,7 @@ def gaussian_blur(img, rng=None, ksize=5, sigma=0):
     if sigma < 0:
         raise ValueError("sigma must be >= 0")
     if sigma == 0:
-        sigma = 0.3 * ((ksize - 1) * 0.5 - 1) + 0.8     
+        sigma = 0.3 * ((ksize - 1) * 0.5 - 1) + 0.8
 
     r = ksize // 2
     x = np.arange(-r, r + 1, dtype=np.float32)
@@ -89,19 +106,72 @@ def gaussian_blur(img, rng=None, ksize=5, sigma=0):
     pad = [(r, r), (r, r)] + [(0, 0)] * (src.ndim - 2)
     p = np.pad(src, pad, mode="reflect")
 
-    tmp = sum(k[i] * p[:, i:i + w] for i in range(ksize))     
-    out = sum(k[i] * tmp[i:i + h] for i in range(ksize))     
+    tmp = sum(k[i] * p[:, i:i + w] for i in range(ksize))
+    out = sum(k[i] * tmp[i:i + h] for i in range(ksize))
 
     if img.dtype == np.uint8:
         return np.clip(np.rint(out), 0, 255).astype(np.uint8)
     return out.astype(img.dtype)
 
 
+def motion_blur(img, rng, length_range=(3, 11), angle_range=(-20, 20)):
+    length = int(rng.integers(length_range[0], length_range[1] + 1))
+    angle = rng.uniform(*angle_range)
+
+    k = length if length % 2 == 1 else length + 1
+    if k < 3:
+        return img.copy()
+
+    kernel = np.zeros((k, k), dtype=np.float32)
+    kernel[k // 2, :] = 1.0
+
+    center = (k - 1) / 2.0
+    rot = cv2.getRotationMatrix2D((center, center), angle, 1.0)
+    kernel = cv2.warpAffine(kernel, rot, (k, k), flags=cv2.INTER_LINEAR)
+
+    s = kernel.sum()
+    if s == 0:
+        return img.copy()
+    kernel /= s
+
+    return cv2.filter2D(img, -1, kernel, borderType=cv2.BORDER_REPLICATE)
+
+
+def brightness_contrast(img, rng, alpha_range=(0.6, 1.4), beta_range=(-40, 40)):
+    alpha = rng.uniform(*alpha_range)
+    beta = rng.uniform(*beta_range)
+
+    img_f = img.astype(np.float32)
+    mean = img_f.mean()
+    out = alpha * (img_f - mean) + mean + beta
+    return np.clip(out, 0, 255).astype(np.uint8)
+
 
 def _rand_color(img, rng):
     if img.ndim == 2:
         return int(rng.integers(0, 256))
     return [int(v) for v in rng.integers(0, 256, size=img.shape[2])]
+
+
+def _ink_color(img, rng, gray_range=(0, 90)):
+    g = int(rng.integers(gray_range[0], gray_range[1] + 1))
+    return g if img.ndim == 2 else (g,) * img.shape[2]
+
+
+def _bg_color(img):
+    m = int(np.median(img))
+    return m if img.ndim == 2 else (m,) * img.shape[2]
+
+
+def _rand_edge_point(rng, W, H, edge):
+    """Random (x, y) on an edge: 0 = left, 1 = right, 2 = top, 3 = bottom."""
+    if edge == 0:
+        return [0, rng.uniform(0, H)]
+    if edge == 1:
+        return [W - 1, rng.uniform(0, H)]
+    if edge == 2:
+        return [rng.uniform(0, W), 0]
+    return [rng.uniform(0, W), H - 1]
 
 
 def _fill_ellipse(img, cx, cy, rx, ry, color):
@@ -169,6 +239,66 @@ def dots_or_clutter(img, rng, mode="dots", amount=200, max_size=4, color=None):
     return out
 
 
+def random_lines(img, rng, count=2, thickness=1):
+    """Straight dark lines from the left edge to the right edge.
+    Each line gets a random thickness between 1 and `thickness`."""
+    out = img.copy()
+    h, w = out.shape[:2]
+
+    for _ in range(int(count)):
+        p0 = (0, int(rng.integers(0, h)))
+        p1 = (w - 1, int(rng.integers(0, h)))
+        t = int(rng.integers(1, int(thickness) + 1))
+        cv2.line(out, p0, p1, _ink_color(out, rng), t, lineType=cv2.LINE_AA)
+    return out
+
+
+def curved_lines(img, rng, count=3, thickness=2):
+    """Dark cubic Bezier curves, each running between two different edges."""
+    out = img.copy()
+    H, W = out.shape[:2]
+    t = np.linspace(0, 1, 300)[:, None]
+
+    for _ in range(int(count)):
+        e1, e2 = rng.choice(4, size=2, replace=False)
+        start = _rand_edge_point(rng, W, H, int(e1))
+        end = _rand_edge_point(rng, W, H, int(e2))
+        mid1 = [rng.uniform(0, W), rng.uniform(0, H)]
+        mid2 = [rng.uniform(0, W), rng.uniform(0, H)]
+        P = np.array([start, mid1, mid2, end])
+
+        B = ((1 - t) ** 3) * P[0] + 3 * ((1 - t) ** 2) * t * P[1] \
+            + 3 * (1 - t) * (t ** 2) * P[2] + (t ** 3) * P[3]
+        pts = np.round(B).astype(np.int32).reshape(-1, 1, 2)
+
+        cv2.polylines(out, [pts], isClosed=False, color=_ink_color(out, rng),
+                      thickness=int(thickness), lineType=cv2.LINE_AA)
+    return out
+
+
+def occlusion_blobs(img, rng, count=3, max_size=8):
+    """Irregular, mostly opaque blobs, each at most `max_size` pixels across."""
+    out = img.copy()
+    H, W = out.shape[:2]
+    angles = np.linspace(0, 2 * np.pi, 60, endpoint=False)
+
+    for _ in range(int(count)):
+        cx, cy = rng.uniform(0, W), rng.uniform(0, H)
+        r = rng.uniform(0.2, 1.0) * max_size / 2
+
+        wobble = sum(rng.uniform(0, 0.2) * np.sin(k * angles + rng.uniform(0, 2 * np.pi))
+                     for k in (1, 2, 3))
+        radius = np.minimum(r * (1 + wobble), max_size / 2)
+
+        pts = np.stack([cx + radius * np.cos(angles), cy + radius * np.sin(angles)], axis=1)
+        pts = np.round(pts).astype(np.int32).reshape(-1, 1, 2)
+
+        overlay = out.copy()
+        cv2.fillPoly(overlay, [pts], color=_rand_color(out, rng), lineType=cv2.LINE_AA)
+        alpha = rng.uniform(0.6, 1.0)
+        out = cv2.addWeighted(overlay, alpha, out, 1 - alpha, 0)
+    return out
+
 
 def _upscale_bilinear(small, h, w):
     sh, sw = small.shape
@@ -193,203 +323,3 @@ def background_texture(shape, rng, base=200, strength=25):
     if len(shape) == 3:
         tex = np.repeat(tex[:, :, None], shape[2], axis=2)
     return tex
-
-
-def brightness_contrast(img, rng, alpha_range=(0.6, 1.4), beta_range=(-40, 40)):
-
-    alpha = rng.uniform(*alpha_range)
-    beta = rng.uniform(*beta_range)
-
-    img_f = img.astype(np.float32)
-    mean = img_f.mean()
-    out = alpha * (img_f - mean) + mean + beta
-    return np.clip(out, 0, 255).astype(np.uint8)
-
-
-def motion_blur(img, rng, length_range=(3, 11), angle_range=(-20, 20)):
-
-    length = int(rng.integers(length_range[0], length_range[1] + 1))
-    angle = rng.uniform(*angle_range)
-
-    k = length if length % 2 == 1 else length + 1      
-    if k < 3:
-        return img.copy()                              
-
-    kernel = np.zeros((k, k), dtype=np.float32)
-    kernel[k // 2, :] = 1.0                            
-
-    center = (k - 1) / 2.0                             
-    rot = cv2.getRotationMatrix2D((center, center), angle, 1.0)
-    kernel = cv2.warpAffine(kernel, rot, (k, k), flags=cv2.INTER_LINEAR)
-
-    s = kernel.sum()
-    if s == 0:
-        return img.copy()
-    kernel /= s
-
-    return cv2.filter2D(img, -1, kernel, borderType=cv2.BORDER_REPLICATE)
-
-# ---------------------------------------------------------------------------
-# Helpers (used by perspective_jitter and random_lines)
-# ---------------------------------------------------------------------------
-
-def _ink_color(img, rng, gray_range=(0, 90)):
-    """Return a random dark gray, similar to the text, so drawn lines look like ink."""
-    g = int(rng.integers(gray_range[0], gray_range[1] + 1))   # random gray level between 0 (black) and 90 (dark gray)
-    return g if img.ndim == 2 else (g,) * img.shape[2]         # grayscale image -> one number; color image -> same value per channel
-
-
-def _bg_color(img):
-    """Return the background color, estimated as the median pixel value."""
-    m = int(np.median(img))                                    # most pixels are background, so the median is a background pixel
-    return m if img.ndim == 2 else (m,) * img.shape[2]         # grayscale -> one number; color -> same value per channel
-
-
-# ---------------------------------------------------------------------------
-# perspective_jitter
-# ---------------------------------------------------------------------------
-
-def perspective_jitter(img, rng, max_shift=0.15):
-    """Simulates a photo of the text taken slightly off-angle.
-
-    Each of the 4 image corners is moved randomly by up to max_shift * width
-    (horizontally) and max_shift * height (vertically). A perspective transform
-    (homography) maps the original corners onto the moved ones. The output canvas
-    is sized to fit the warped shape exactly, so no text is cut off, and is then
-    resized back to the input's shape.
-    """
-    h, w = img.shape[:2]                                       # image height and width in pixels
-
-    # the 4 corners of the input image: top-left, top-right, bottom-right, bottom-left (x, y)
-    src = np.float32([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]])
-
-    # random shift for each corner: x in [-max_shift*w, +max_shift*w], y in [-max_shift*h, +max_shift*h]
-    shift = rng.uniform(-max_shift, max_shift, size=(4, 2)) * np.array([w, h])
-    dst = src + shift                                          # where each corner ends up after the shift
-
-    # move the shifted shape so its top-left-most point is at (0, 0)
-    dst -= dst.min(axis=0)                                     # dst.min(axis=0) = smallest x and smallest y among the 4 corners
-
-    # canvas just large enough to hold the warped shape, so nothing is pushed out of frame
-    out_w = int(np.ceil(dst[:, 0].max())) + 1                  # width  = largest x after the move
-    out_h = int(np.ceil(dst[:, 1].max())) + 1                  # height = largest y after the move
-
-    # 3x3 homography matrix that sends each src corner to its dst corner
-    M = cv2.getPerspectiveTransform(src, dst.astype(np.float32))
-
-    # apply the homography to every pixel; uncovered areas are filled with the background color
-    warped = cv2.warpPerspective(img, M, (out_w, out_h),
-                                 flags=cv2.INTER_LINEAR,       # blend the 4 nearest pixels for smooth edges
-                                 borderMode=cv2.BORDER_CONSTANT,
-                                 borderValue=_bg_color(img))
-
-    # resize back to the original (h, w) so the next noise step gets the expected shape
-    return cv2.resize(warped, (w, h), interpolation=cv2.INTER_AREA)   # INTER_AREA averages pixels, best for shrinking
-
-
-# ---------------------------------------------------------------------------
-# random_lines
-# ---------------------------------------------------------------------------
-
-def random_lines(img, rng, count=2, thickness=1):
-    """Draws straight dark lines across the text, like strike-throughs or ruled lines.
-
-    count     = number of lines to draw
-    thickness = maximum line thickness in pixels (each line gets a random thickness from 1 to this)
-    """
-    out = img.copy()                                           # copy so the input image is not modified (cv2 draws in place)
-    h, w = out.shape[:2]                                       # image height and width in pixels
-
-    for _ in range(int(count)):                                # draw `count` lines
-        p0 = (0, int(rng.integers(0, h)))                      # start point: left edge, random height
-        p1 = (w - 1, int(rng.integers(0, h)))                  # end point: right edge, random height
-        t = int(rng.integers(1, int(thickness) + 1))           # random thickness between 1 and `thickness`
-        cv2.line(out, p0, p1, _ink_color(out, rng), t,         # draw the line in a random dark gray
-                 lineType=cv2.LINE_AA)                         # anti-aliased: smooth edges like real ink
-
-    return out                                                 # same shape and dtype as the input
-def rand_edge_point(rng, W, H, edge):
-    """A random (x, y) point on one edge: 0 = left, 1 = right, 2 = top, 3 = bottom."""
-    if edge == 0:
-        return [0, rng.uniform(0, H)]
-    if edge == 1:
-        return [W - 1, rng.uniform(0, H)]
-    if edge == 2:
-        return [rng.uniform(0, W), 0]
-    return [rng.uniform(0, W), H - 1]
- 
- 
-
-def curved_lines(img, rng, count=3, thickness=2):
-    """
-    Draws "count" wavy lines across the image, each "thickness" pixels wide.
-
-    Each image start from the left end and goes to right
-
-    Returns a new array, the input img is not modified.
-    """
-    out = img.copy()
-    H, W = out.shape[:2]
-    channels = 1 if out.ndim == 2 else out.shape[2]
-    t = np.linspace(0, 1, 300)[:, None]          # 300 points along each curve
-    # 300 points are able to give the smoothness to the line
-
-    for _ in range(count):
-
-        e1, e2 = rng.choice(4, size=2, replace=False) # i randonmly select two edge so that we get start
-        # and end on different edges
-        start = rand_edge_point(rng, W, H, e1)
-        end = rand_edge_point(rng, W, H, e2)
-        
-        
-        # Two random points in the middle decide how the line bends
-        mid1 = [rng.uniform(0, W), rng.uniform(0, H)]
-        mid2 = [rng.uniform(0, W), rng.uniform(0, H)]
-        P = np.array([start, mid1, mid2, end])
-
-        # using this equation to find the 300 coordinates for the line, as t changes the the effect
-        # of each of four selected points change
-        B = ((1 - t) ** 3) * P[0] + 3 * ((1 - t) ** 2) * t * P[1] \
-            + 3 * (1 - t) * (t ** 2) * P[2] + (t ** 3) * P[3]
-        pts = np.round(B).astype(np.int32).reshape(-1, 1, 2)
-
-        color = _rand_color(img, rng)   
-        cv2.polylines(out, [pts], isClosed=False, color=color,
-                      thickness=thickness, lineType=cv2.LINE_AA)
-
-    return out
-
-
-def occlusion_blobs(img, rng, count=3, max_size=8):
-    """Covers the image with "count" irregular blobs, each at most "max_size" pixels across.
-    we use a circle to create a blob, so maximum allowed radius would max_size/2
-
-    Returns a new array; the input is not modified.
-    """
-    out = img.copy()
-    H, W = out.shape[:2]
-    channels = 1 if out.ndim == 2 else out.shape[2]
-    angles = np.linspace(0, 2 * np.pi, 60, endpoint=False)
-
-    for n in range(count):
-        cx, cy = rng.uniform(0, W), rng.uniform(0, H)       # blob centre
-        r = rng.uniform(0.2, 1.0) * max_size / 2            # base radius
-
-        # for every angle we add the values from three sin curves, each with different amounts of maxima and minima
-        # so that we get different amounts of radius, for every angle
-        wobble = sum(rng.uniform(0, 0.2) * np.sin(k * angles + rng.uniform(0, 2 * np.pi)) for k in (1, 2, 3))
-        radius = np.minimum(r * (1 + wobble), max_size / 2)  # never exceed max_size
-
-        pts = np.stack([cx + radius * np.cos(angles), cy + radius * np.sin(angles)], axis=1)
-        # converts polar form into cartesian form 
-        pts = np.round(pts).astype(np.int32).reshape(-1, 1, 2)
-
-        # We draw blob on another copy, so that we can implement the opacity thing
-        overlay = out.copy()
-        cv2.fillPoly(overlay, [pts], color=_rand_color(img, rng), lineType=cv2.LINE_AA)
-        alpha = rng.uniform(0.6, 1.0)                        # mostly opaque
-        out = cv2.addWeighted(overlay, alpha, out, 1 - alpha)
-        # basically adding two images on top of each other pixel by pixel to get
-        # the opacity effect
-
-    return out
